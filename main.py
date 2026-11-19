@@ -58,6 +58,8 @@ def walk_chunks(png):
                                % kind.decode("latin1"))
         yield kind, payload
         cursor = stop
+        if kind == b"IEND" and cursor != len(png):
+            raise ArtworkError("trailing bytes after the IEND chunk")
 
 
 def inspect(png):
