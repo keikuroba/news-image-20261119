@@ -1,121 +1,130 @@
 #!/usr/bin/env python3
-"""news-image-20261119: emit the 19 November 2026 news image.
+"""news-image-20261119: write the 19 November 2026 news image.
 
-The finished artwork ships inside this repository as assets/entry.png
-(it was drawn at build time by tools/make_image.py from the stories
-reported on Thursday 19 November 2026). This program only copies it,
-byte for byte, to the grader's output file. It touches no network, reads
-no clock and rolls no dice, so two runs write identical bytes.
+The artwork is bundled with this repository at assets/entry.png — a
+1024x1024 front page drawn at build time by tools/make_image.py from the
+stories first reported on Thursday 19 November 2026. All this program
+does is check that artwork and copy it, byte for byte, to the output
+file. No network, no clock, no randomness: two runs write identical
+bytes.
 
-Where the file goes: $MAKEFUN_OUTPUT_DIR first, then
+Output location, first match wins: $MAKEFUN_OUTPUT_DIR, then
 $ENTRY_OUTPUT_DIR, then /output.
 """
 
 import hashlib
 import os
+import struct
 import sys
 import zlib
 
-HERE = os.path.dirname(os.path.realpath(__file__))
-BUNDLED = os.path.join(HERE, "assets", "entry.png")
-ONE_MIB = 1024 * 1024
-SIGNATURE = b"\x89PNG\r\n\x1a\n"
+BASE = os.path.dirname(os.path.realpath(__file__))
+ARTWORK = os.path.join(BASE, "assets", "entry.png")
+MAX_BYTES = 1024 * 1024
+EXPECTED_SIZE = (1024, 1024)
+MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
-class BadImage(Exception):
-    """The bundled artwork failed a structural check."""
+class ArtworkError(Exception):
+    """The bundled artwork is missing or fails a structural check."""
 
 
-def _u32be(buf, off):
-    return int.from_bytes(buf[off:off + 4], "big")
+def be32(chunk, at):
+    """One big-endian unsigned 32-bit word out of a byte string."""
+    return struct.unpack_from(">I", chunk, at)[0]
 
 
-def _chunks(blob):
-    """Yield (kind, data) for every chunk of a PNG byte string."""
-    if blob[:8] != SIGNATURE:
-        raise BadImage("not a PNG (bad signature)")
-    pos = 8
-    while pos < len(blob):
-        if pos + 8 > len(blob):
-            raise BadImage("truncated chunk header")
-        size = _u32be(blob, pos)
-        kind = blob[pos + 4:pos + 8]
-        end = pos + 8 + size + 4
-        if end > len(blob):
-            raise BadImage("truncated %s chunk" % kind.decode("latin1"))
-        data = blob[pos + 8:pos + 8 + size]
-        want = zlib.crc32(kind + data) & 0xFFFFFFFF
-        if _u32be(blob, pos + 8 + size) != want:
-            raise BadImage("CRC mismatch in %s chunk" % kind.decode("latin1"))
-        pos = end
-        yield kind, data
+def walk_chunks(png):
+    """Walk a PNG's chunks, checking every CRC as we go.
+
+    Yields (type, payload) pairs. Raises ArtworkError on any defect.
+    """
+    if png[:8] != MAGIC:
+        raise ArtworkError("bundled file is not a PNG")
+    cursor = 8
+    while cursor < len(png):
+        if cursor + 8 > len(png):
+            raise ArtworkError("chunk header cut short at offset %d" % cursor)
+        length = be32(png, cursor)
+        kind = png[cursor + 4:cursor + 8]
+        stop = cursor + 8 + length + 4
+        if stop > len(png):
+            raise ArtworkError("chunk %r runs past the end of the file"
+                               % kind.decode("latin1"))
+        payload = png[cursor + 8:cursor + 8 + length]
+        stored_crc = be32(png, cursor + 8 + length)
+        if zlib.crc32(kind + payload) & 0xFFFFFFFF != stored_crc:
+            raise ArtworkError("CRC mismatch in %s chunk"
+                               % kind.decode("latin1"))
+        yield kind, payload
+        cursor = stop
 
 
-def validate(blob):
-    """Full structural validation of the bundled PNG bytes."""
-    if len(blob) > ONE_MIB:
-        raise BadImage("bundled image over 1 MiB: %d bytes" % len(blob))
-    width = height = None
-    idat = bytearray()
-    seen_iend = False
-    for kind, data in _chunks(blob):
+def inspect(png):
+    """Validate the bundled PNG; return its (width, height)."""
+    if len(png) > MAX_BYTES:
+        raise ArtworkError("bundled image is %d bytes, over the 1 MiB cap"
+                           % len(png))
+    dims = None
+    pixels = bytearray()
+    closed = False
+    for kind, payload in walk_chunks(png):
         if kind == b"IHDR":
-            if len(data) != 13:
-                raise BadImage("bad IHDR length")
-            width = _u32be(data, 0)
-            height = _u32be(data, 4)
-            if (width, height) != (1024, 1024):
-                raise BadImage("expected 1024x1024, got %dx%d"
-                               % (width, height))
+            if len(payload) != 13:
+                raise ArtworkError("IHDR is %d bytes, expected 13"
+                                   % len(payload))
+            dims = (be32(payload, 0), be32(payload, 4))
+            if dims != EXPECTED_SIZE:
+                raise ArtworkError("image is %dx%d, expected 1024x1024"
+                                   % dims)
         elif kind == b"IDAT":
-            idat.extend(data)
+            pixels.extend(payload)
         elif kind == b"IEND":
-            seen_iend = True
-    if width is None:
-        raise BadImage("no IHDR chunk")
-    if not seen_iend:
-        raise BadImage("no IEND chunk")
-    # The pixel data must inflate: a corrupt IDAT stream fails here.
-    raw = zlib.decompress(bytes(idat))
-    expect = height * (1 + width * 3)
-    if len(raw) != expect:
-        raise BadImage("inflated pixel data %d bytes, expected %d"
-                       % (len(raw), expect))
-    return width, height
+            closed = True
+    if dims is None:
+        raise ArtworkError("no IHDR chunk found")
+    if not closed:
+        raise ArtworkError("no IEND chunk found")
+    # Inflating the pixel stream proves the IDAT data is intact.
+    plain = zlib.decompress(bytes(pixels))
+    wanted = EXPECTED_SIZE[1] * (1 + EXPECTED_SIZE[0] * 3)
+    if len(plain) != wanted:
+        raise ArtworkError("pixel data inflates to %d bytes, expected %d"
+                           % (len(plain), wanted))
+    return dims
 
 
-def out_dir():
-    for var in ("MAKEFUN_OUTPUT_DIR", "ENTRY_OUTPUT_DIR"):
-        val = os.environ.get(var)
-        if val:
-            return val
+def pick_output_dir():
+    for name in ("MAKEFUN_OUTPUT_DIR", "ENTRY_OUTPUT_DIR"):
+        value = os.environ.get(name)
+        if value:
+            return value
     return "/output"
 
 
-def main():
-    if not os.path.isfile(BUNDLED):
-        print("error: bundled image missing: %s" % BUNDLED, file=sys.stderr)
+def run():
+    if not os.path.isfile(ARTWORK):
+        print("error: bundled artwork is missing: %s" % ARTWORK,
+              file=sys.stderr)
         print("the repository must contain assets/entry.png", file=sys.stderr)
         return 1
-    with open(BUNDLED, "rb") as fh:
-        blob = fh.read()
-    width, height = validate(blob)
-    dest_dir = out_dir()
-    os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, "entry.png")
-    digest = hashlib.sha256(blob).hexdigest()
-    with open(dest, "wb") as fh:
-        fh.write(blob)
-    # Verify the write by reading the file back and comparing digests:
-    # a short write or a disk error must fail loudly, not silently.
-    with open(dest, "rb") as fh:
-        written = fh.read()
-    if hashlib.sha256(written).hexdigest() != digest:
-        raise BadImage("written file does not match bundled image")
+    with open(ARTWORK, "rb") as handle:
+        png = handle.read()
+    width, height = inspect(png)
+    fingerprint = hashlib.sha256(png).hexdigest()
+    folder = pick_output_dir()
+    os.makedirs(folder, exist_ok=True)
+    target = os.path.join(folder, "entry.png")
+    with open(target, "wb") as handle:
+        handle.write(png)
+    with open(target, "rb") as handle:
+        again = handle.read()
+    if hashlib.sha256(again).hexdigest() != fingerprint:
+        raise ArtworkError("the written file differs from the bundled image")
     print("wrote %s (%dx%d, %d bytes, sha256 %s)"
-          % (dest, width, height, len(blob), digest))
+          % (target, width, height, len(png), fingerprint))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())
