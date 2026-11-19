@@ -93,6 +93,10 @@ def out_dir():
 
 
 def main():
+    if not os.path.isfile(BUNDLED):
+        print("error: bundled image missing: %s" % BUNDLED, file=sys.stderr)
+        print("the repository must contain assets/entry.png", file=sys.stderr)
+        return 1
     with open(BUNDLED, "rb") as fh:
         blob = fh.read()
     width, height = validate(blob)
