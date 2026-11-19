@@ -99,9 +99,15 @@ def main():
     dest_dir = out_dir()
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, "entry.png")
+    digest = hashlib.sha256(blob).hexdigest()
     with open(dest, "wb") as fh:
         fh.write(blob)
-    digest = hashlib.sha256(blob).hexdigest()
+    # Verify the write by reading the file back and comparing digests:
+    # a short write or a disk error must fail loudly, not silently.
+    with open(dest, "rb") as fh:
+        written = fh.read()
+    if hashlib.sha256(written).hexdigest() != digest:
+        raise BadImage("written file does not match bundled image")
     print("wrote %s (%dx%d, %d bytes, sha256 %s)"
           % (dest, width, height, len(blob), digest))
     return 0
